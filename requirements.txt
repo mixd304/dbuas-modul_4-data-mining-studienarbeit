@@ -1,13 +1,10 @@
 pandas
 numpy
-datetime
 seaborn
-ydata_profiling
 jupyter
 jupyterlab
-sqlite3
-statsmodels.tsa.seasonal
+statsmodels
 prophet
 xgboost
-matplotlib.pyplot
-matplotlib.dates
+matplotlib
+ydata-profiling

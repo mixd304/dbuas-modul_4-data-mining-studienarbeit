@@ -14,6 +14,7 @@ $ conda activate dbuas-data-mining-studienarbeit-dariusmix
 
 zum entfernen der neuen Umgebung aus conda:
 ```
+$ conda deactivate
 $ conda env remove --name dbuas-data-mining-studienarbeit-dariusmix
 ```
 

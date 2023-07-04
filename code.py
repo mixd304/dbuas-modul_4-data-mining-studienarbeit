@@ -1,46 +1,98 @@
-#df_store.isnull().sum()
-#
-#df_store[pd.isnull(df_store.CompetitionDistance)]
-#
-## Fehlende Werte der "CompetitionDistance" mit dem Median ersetzen
-#df_store['CompetitionDistance'].fillna(df_store['CompetitionDistance'].median(), inplace=True)
-#
-## Prüfen, ob es CompetitionOpenSince[Month/Year] zusammenhänge gibt, bei denen CompetitionOpenSince[Month/Year] NULL ist
-#df_CompetitionOpenSinceMonth = df_store[pd.isnull(df_store.CompetitionOpenSinceMonth)]
-#df_CompetitionOpenSinceMonth.head()
-#
-#print('Month', df_store['CompetitionOpenSinceMonth'].median())
-#print('Year', df_store['CompetitionOpenSinceYear'].median())
-#df_store['CompetitionOpenSinceYear'].describe()
-#
-## Es scheint keine Zusammenhänge mit den anderen Werten zu geben, da NULLs aber entfernt werden müssen, werden die Daten mit 0 ersetzt
-#df_store['CompetitionOpenSinceMonth'].fillna(0, inplace=True)
-#df_store['CompetitionOpenSinceYear'].fillna(0, inplace=True)
-#
-## Promo2 Zusatzfelder
-#Promo2 - Promo2 is a continuing and consecutive promotion for some stores: 0 = store is not participating, 1 = store is participating
-#Promo2Since[Year/Week] - describes the year and calendar week when the store started participating in Promo2
-#PromoInterval - describes the consecutive intervals Promo2 is started, naming the months the promotion is started anew. E.g. "Feb,May,Aug,Nov" means each round starts in February, May, August, November of any given year for that store
-#
-## Prüfen, ob es zusammenhänge gibt, bei denen die Promo2 Zusatzfelder NULL sind
-#df_Promo2SinceWeek = df_store[pd.isnull(df_store.Promo2SinceWeek)]
-#df_Promo2SinceWeek.head()
-#
-## Es sieht so aus, als wären die Felder NULL wenn Promo2 = 0 ist
-## Prüfen, ob Promo2SinceWeek, Promo2SinceYear, PromoInterval nur NULL sind, wenn Promo2 auch 0 ist (also der Store an keiner Promo teilnimmt)
-#df_Promo2SinceWeek = df_store[pd.isnull(df_store.Promo2SinceWeek)]
-#print(df_Promo2SinceWeek[df_Promo2SinceWeek.Promo2 != 0].shape[0])
-#
-#df_Promo2SinceYear = df_store[pd.isnull(df_store.Promo2SinceYear)]
-#print(df_Promo2SinceYear[df_Promo2SinceYear.Promo2 != 0].shape[0])
-#
-#df_PromoInterval = df_store[pd.isnull(df_store.PromoInterval)]
-#print(df_PromoInterval[df_PromoInterval.Promo2 != 0].shape[0])
-#
-## Ja, NULL in den 3 Spalten bedeutet, dass es keine Information über eine Promo gibt
-## Ersetzen der NULL Werte durch 0
-#df_store['Promo2SinceWeek'].fillna(0, inplace=True)
-#df_store['Promo2SinceYear'].fillna(0, inplace=True)
-#df_store['PromoInterval'].fillna(0, inplace=True)
-#
-#df_store.isnull().sum()
+import os
+import pandas as pd
+import numpy as np
+import sqlite3
+from prophet import Prophet
+
+FILEPATH_TRAIN = os.path.join("input", "train.csv")
+FILEPATH_STORE = os.path.join("input", "store.csv")
+FILEPATH_TEST = os.path.join("input", "test.csv")
+
+IMG_PATH = os.path.join("output", "images")
+
+if not os.path.exists(IMG_PATH):
+    os.makedirs(IMG_PATH)
+
+df_train = pd.read_csv(FILEPATH_TRAIN, low_memory=False)
+df_store = pd.read_csv(FILEPATH_STORE)
+df_test = pd.read_csv(FILEPATH_TEST, low_memory=False)
+
+df_train_store = pd.merge(df_train, df_store, on="Store", how="inner")
+
+# Erstellen des Dataframes für die Feiertage
+state_dates = df_train_store[(df_train_store.StateHoliday == 'a') | (df_train_store.StateHoliday == 'b') & (df_train_store.StateHoliday == 'c')].loc[:, 'Date'].values
+school_dates = df_train_store[df_train_store.SchoolHoliday == 1].loc[:, 'Date'].values
+
+state = pd.DataFrame({'holiday': 'state_holiday',
+                      'ds': pd.to_datetime(state_dates)})
+school = pd.DataFrame({'holiday': 'school_holiday',
+                      'ds': pd.to_datetime(school_dates)})
+
+holidays = pd.concat((state, school))
+
+# Initialisieren ein leeren DataFrames, um den Forecast für alle Stores zu speichern
+prophet_all_forecasts = pd.DataFrame()
+
+# Da es insgesamt 1115 Stores gibt und der Forecast für alle Stores sehr lange dauern würde, wird der Forecast für 5 Stores je Storetype durchgeführt
+for store_type in df_train_store.StoreType.unique():
+    stores = df_train_store[df_train_store.StoreType == store_type].Store.unique()[:1]
+
+    for store in stores:
+
+        sales = df_train_store[df_train_store.Store == store].loc[:, ['Date', 'Sales']]
+        sales.sort_values(by='Date', inplace=True)
+        sales.reset_index(drop=True, inplace=True)
+        sales['Date'] = pd.DatetimeIndex(sales['Date'])
+        sales = sales.rename(columns={'Date': 'ds', 'Sales': 'y'})
+
+        m = Prophet(holidays=holidays)
+        m.fit(sales)
+        future = m.make_future_dataframe(periods=183)
+        forecast = m.predict(future)
+
+        # Store-Informationen zum Forecast-Dataframe hinzufügen
+        forecast['store'] = store
+        forecast['store_type'] = store_type
+
+        # Anhängen des Forecasts für den aktuellen Store an das all_forecasts-DataFrame
+        prophet_all_forecasts = pd.concat([prophet_all_forecasts, forecast])
+
+# Verbindung zur Datenbank herstellen - wenn die Datenbank nicht existiert, wird sie automatisch erstellt
+conn = sqlite3.connect('../output/rossmann-store-sales-2.db')
+
+# Cursor erstellen
+c = conn.cursor()
+
+# Tabelle erstellen, falls sie nicht bereits existiert
+c.execute('''CREATE TABLE IF NOT EXISTS sales_forecast_prophet
+             (id INTEGER PRIMARY KEY,
+              store INTEGER,
+              store_type TEXT,
+              date TEXT,
+              yhat REAL,
+              yhat_lower REAL,
+              yhat_upper REAL
+              )''')
+
+# Tabelle leeren, falls sie bereits existiert und Daten enthält
+c.execute('''delete from sales_forecast_prophet''')
+
+prophet_all_forecasts = prophet_all_forecasts[[
+    'store', 'store_type', 'ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
+for row in prophet_all_forecasts.iterrows():
+    store = row[1]['store']
+    store_type = row[1]['store_type']
+    ds = row[1]['ds'].strftime('%Y-%m-%d')
+    yhat = row[1]['yhat']
+    yhat_lower = row[1]['yhat_lower']
+    yhat_upper = row[1]['yhat_upper']
+
+    c.execute('''INSERT INTO sales_forecast_prophet (store, store_type, date, yhat, yhat_lower, yhat_upper)
+                    VALUES (?, ?, ?, ?, ?, ?)''', (store, store_type, ds, yhat, yhat_lower, yhat_upper))
+
+# Änderungen bestätigen
+conn.commit()
+
+# Verbindung schließen
+conn.close()
